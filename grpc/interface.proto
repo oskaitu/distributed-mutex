@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package beer;
+option go_package = "github.com/oskaitu/distributed-mutex;beer";
+
+service CriticalPing{
+    rpc Ping(Request) returns (Reply) {}
+}
+
+message Request{
+    int32 id = 1;
+}
+message Reply{
+    int32 amount = 1;
+}
