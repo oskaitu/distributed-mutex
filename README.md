@@ -38,3 +38,10 @@ Grading notes
 
 Partial implementations may be accepted, if the students can reason what they should have done in the report.
 In order to pass, the students have to attempt to answer all questions.
+
+
+### CREATE PROTO FILE
+protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative grpc/interface.proto
+
+### How to run the code
+Open 3 terminals. Write: go run . 0, go run . 1, go run . 2 in each seperate terminal

@@ -9,7 +9,10 @@ service CriticalPing{
 
 message Request{
     int32 id = 1;
+    int32 Timestamp = 2;
 }
 message Reply{
     int32 id = 1;
+    int32 Timestamp = 2;
+    bool status = 3;
 }
