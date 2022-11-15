@@ -96,7 +96,7 @@ func main() {
 	for {
 		if p.state == Released {
 			sleepTime(randomNumberGenerator(2, 7))
-			grpcLog.Infof("Trying to take the critical function: %v\n", p.id)
+			grpcLog.Infof("Trying to take the critical function: %v : %v\n", p.id, p.time)
 			p.requestToDrink()
 		}
 	}
@@ -142,7 +142,7 @@ func (p *Peer) requestToDrink() {
 			defer wg.Done()
 			reply, _ := c.Drink(p.ctx, &req)
 			p.updateClock(reply.Timestamp)
-			grpcLog.Infof("Reply from %d", reply.Id)
+			grpcLog.Infof("Reply from %d At time: %v", reply.Id, reply.Timestamp)
 		}(client)
 	}
 
@@ -153,9 +153,9 @@ func (p *Peer) requestToDrink() {
 
 func (p *Peer) drink() {
 	defer p.releaseBeer()
-	grpcLog.Info("Drinking...")
+	grpcLog.Infof("Drinking... At time :%v", p.time)
 	sleepTime(randomNumberGenerator(2, 7))
-	grpcLog.Info("Done drinking.")
+	grpcLog.Infof("Done drinking. At time :%v", p.time)
 }
 
 func (p *Peer) releaseBeer() {
