@@ -19,17 +19,24 @@ var grpcLog glog.LoggerV2
 
 var amount_of_peers = 3
 
+type State int
+
+const (
+	Released State = iota
+	Wanted
+	Held
+)
+
 type Peer struct {
-	beer.UnimplementedCriticalPingServer
-	id           int32
-	clients      map[int32]beer.CriticalPingClient
-	timeForPeers int32
-	ctx          context.Context
-	status    	 *State
-	
-}
-type State struct {
-	held bool
+	beer.UnimplementedDistributedMutexServer
+	id          int32
+	state       State
+	time        int32
+	timeLock    sync.Mutex
+	requestTime int32
+	drinkWG     sync.WaitGroup
+	clients     map[int32]beer.DistributedMutexClient
+	ctx         context.Context
 }
 
 var mutex = &sync.Mutex{}
@@ -39,20 +46,19 @@ func init() {
 }
 
 func main() {
+	// Port
 	arg1, _ := strconv.ParseInt(os.Args[1], 10, 32)
-	ownPort := int32(arg1) + 5000
-	state := &State{
-		held: false, 
-	}
+	ownPort := int32(arg1) + 5001
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	p := &Peer{
-		id:           ownPort,
-		timeForPeers: 0,
-		clients:      make(map[int32]beer.CriticalPingClient),
-		ctx:          ctx,
-		status: 		  state,
+		id:      ownPort,
+		state:   Released,
+		time:    0,
+		clients: make(map[int32]beer.DistributedMutexClient),
+		ctx:     ctx,
 	}
 
 	// Create listener tcp on port ownPort
@@ -61,7 +67,7 @@ func main() {
 		grpcLog.Errorf("Failed to listen on port: %v", err)
 	}
 	grpcServer := grpc.NewServer()
-	beer.RegisterCriticalPingServer(grpcServer, p)
+	beer.RegisterDistributedMutexServer(grpcServer, p)
 
 	go func() {
 		if err := grpcServer.Serve(list); err != nil {
@@ -70,108 +76,116 @@ func main() {
 	}()
 
 	for i := 0; i < amount_of_peers; i++ {
-		port := int32(5000) + int32(i)
+		port := int32(5001) + int32(i)
 
 		if port == ownPort {
 			continue
 		}
 
 		var conn *grpc.ClientConn
-		//grpcLog.Infof("Trying to dial: %v\n", port)
+		grpcLog.Infof("Trying to dial: %v\n", port)
 		conn, err := grpc.Dial(fmt.Sprintf(":%v", port), grpc.WithInsecure(), grpc.WithBlock())
 		if err != nil {
 			grpcLog.Errorf("Could not connect: %s", err)
 		}
 		defer conn.Close()
-		c := beer.NewCriticalPingClient(conn)
+		c := beer.NewDistributedMutexClient(conn)
 		p.clients[port] = c
 	}
 
 	for {
-		if(!p.status.held){
+		if p.state == Released {
+			sleepTime(randomNumberGenerator(2, 7))
 			grpcLog.Infof("Trying to take the critical function: %v\n", p.id)
-			sleepTime(randomNumberGenerator(5, 15))
-			p.sendPingToAll()
+			p.requestToDrink()
 		}
-		
 	}
 }
 
-// This is for receiving
-func (p *Peer) Ping(ctx context.Context, req *beer.Request) (*beer.Reply, error) {
+func (p *Peer) Drink(ctx context.Context, req *beer.Request) (*beer.Reply, error) {
+	// Lamport time
+	if p.time < req.Timestamp {
+		p.time = req.Timestamp
+	}
+	p.time++
 
-	rep := &beer.Reply{Id: p.id, Timestamp: p.timeForPeers , Status: p.status.held}
+	if p.state == Held || (p.state == Wanted && p.requestIsBefore(req)) {
+		p.drinkWG.Wait()
+	}
 
+	rep := &beer.Reply{Id: p.id, Timestamp: p.time}
 	return rep, nil
 }
 
-func (p *Peer) CriticalFunction() {
-	p.status.held = true
-	mutex.Lock()
-	grpcLog.Infof("Hello I am doing the critical function %v, %v", p.id, p.timeForPeers)
-	
-	sleepTime(randomNumberGenerator(5, 10))
-	mutex.Unlock()
-	p.status.held = false
-	p.timeForPeers++
+func (p *Peer) requestToDrink() {
+	// Updated time
+	p.updateClock(p.time)
+	p.requestTime = p.time
 
-	grpcLog.Infof("I am done with the critical function %v, %v", p.id, p.timeForPeers)
+	// WG
+	p.drinkWG.Add(1)
 
+	// Set state
+	p.state = Wanted
+
+	// Request
+	req := beer.Request{
+		Timestamp: p.requestTime,
+		Id:        p.id,
+	}
+
+	// Wait group
+	var wg sync.WaitGroup
+	for _, client := range p.clients {
+		wg.Add(1)
+		go func(c beer.DistributedMutexClient) {
+			defer wg.Done()
+			reply, _ := c.Drink(p.ctx, &req)
+			p.updateClock(reply.Timestamp)
+			grpcLog.Infof("Reply from %d", reply.Id)
+		}(client)
+	}
+
+	wg.Wait()
+	p.state = Held
+	p.drink()
 }
 
-// Source for function https://golang.cafe/blog/golang-sleep-random-time.html
+func (p *Peer) drink() {
+	defer p.releaseBeer()
+	grpcLog.Info("Drinking...")
+	sleepTime(randomNumberGenerator(2, 7))
+	grpcLog.Info("Done drinking.")
+}
+
+func (p *Peer) releaseBeer() {
+	p.state = Released
+	p.drinkWG.Done()
+}
+
+func (p *Peer) updateClock(time int32) {
+	p.timeLock.Lock()
+	defer p.timeLock.Unlock()
+
+	if p.time < time {
+		p.time = time
+	}
+	p.time++
+}
+
+func (p *Peer) requestIsBefore(req *beer.Request) bool {
+	if req.Timestamp < p.time || (req.Timestamp == p.time && req.Id < p.time) {
+		return true
+	}
+	return false
+}
+
 func sleepTime(n int) {
-	rand.Seed(time.Now().UnixNano())
 	time.Sleep(time.Duration(n) * time.Second)
 }
 
 func randomNumberGenerator(min int, max int) int {
+	rand.Seed(time.Now().UnixNano())
 	n := (rand.Intn(max-min) + min)
 	return n
-}
-func (p *Peer) sendPingToAskIfTheyHoldIt(){
-	request := &beer.Request{Id: p.id, Timestamp: p.timeForPeers}
-	counter := 0
-	for _, client := range p.clients {
-		reply, err := client.Ping(p.ctx, request)
-		if err != nil {
-			grpcLog.Errorln("Cannot connect to client")
-		}
-		if(!reply.Status){
-			counter++
-		}
-	}
-	if(counter == amount_of_peers - 1){
-		p.CriticalFunction()
-	}
-	grpcLog.Infof("Timestamp approved, critical process was already occupied %v", request.Id)
-}
-
-// This is to ping the other clients that are connected
-func (p *Peer) sendPingToAll() {
-	request := &beer.Request{Id: p.id, Timestamp: p.timeForPeers}
-	counterForLesserTimestamps := 0
-	counterForEqualTimestamps := 0
-	for _, client := range p.clients {
-		reply, err := client.Ping(p.ctx, request)
-		if err != nil {
-			grpcLog.Errorln("Cannot connect to client ")
-		}
-		
-		if (request.Timestamp < reply.Timestamp) {
-			counterForLesserTimestamps++
-
-		} else if request.Timestamp == reply.Timestamp {
-			
-				counterForEqualTimestamps++
-		}
-
-		if (counterForLesserTimestamps  == amount_of_peers-1 || 
-			counterForEqualTimestamps == amount_of_peers -1 || 
-			counterForLesserTimestamps == counterForEqualTimestamps) {
-			p.sendPingToAskIfTheyHoldIt()	
-			
-		}
-	}
-	grpcLog.Infof("Request for Critical Function was denied %v", request.Id)
 }
